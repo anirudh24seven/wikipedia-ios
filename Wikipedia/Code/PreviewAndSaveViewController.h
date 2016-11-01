@@ -15,6 +15,9 @@
 @property (strong, nonatomic) EditFunnel *funnel;
 @property (strong, nonatomic) SavedPagesFunnel *savedPagesFunnel;
 
+@property (nonatomic, strong) MWKDataStore *dataStore;
+@property (nonatomic, strong) WMFArticlePreviewDataStore *previewStore;
+
 - (void)reloadCaptchaPushed:(id)sender;
 
 @property (strong, nonatomic) NSString *summaryText;

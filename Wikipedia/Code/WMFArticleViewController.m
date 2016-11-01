@@ -1559,6 +1559,8 @@ static const CGFloat WMFArticleViewControllerTableOfContentsSectionUpdateScrollD
         SectionEditorViewController *sectionEditVC = [SectionEditorViewController wmf_initialViewControllerFromClassStoryboard];
         sectionEditVC.section = section;
         sectionEditVC.delegate = self;
+        sectionEditVC.dataStore = self.dataStore;
+        sectionEditVC.previewStore = self.previewStore;
         UINavigationController *nc = [[UINavigationController alloc] initWithRootViewController:sectionEditVC];
         [self presentViewController:nc animated:YES completion:NULL];
     } else {

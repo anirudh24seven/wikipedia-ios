@@ -17,6 +17,9 @@
 @property (strong, nonatomic) EditFunnel *funnel;
 @property (strong, nonatomic) SavedPagesFunnel *savedPagesFunnel;
 
+@property (nonatomic, strong) MWKDataStore *dataStore;
+@property (nonatomic, strong) WMFArticlePreviewDataStore *previewStore;
+
 @property (weak, nonatomic) id<SectionEditorViewControllerDelegate> delegate;
 
 @end

@@ -122,13 +122,21 @@ typedef NS_ENUM(NSInteger, WMFPreviewAndSaveMode) {
 }
 
 - (void)wmf_showAlertForTappedAnchorHref:(NSString *)href {
+    
     UIAlertController *alertController =
-        [UIAlertController alertControllerWithTitle:href
-                                            message:nil
+        [UIAlertController alertControllerWithTitle:@"Your changes have not been saved yet"
+                                            message:@"Are you sure you want to leave this page?"
                                      preferredStyle:UIAlertControllerStyleAlert];
-    [alertController addAction:[UIAlertAction actionWithTitle:MWLocalizedString(@"button-ok", nil)
-                                                        style:UIAlertActionStyleDefault
+    [alertController addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                                        style:UIAlertActionStyleCancel
                                                       handler:nil]];
+    [alertController addAction:[UIAlertAction actionWithTitle:@"Leave"
+                                                        style:UIAlertActionStyleDefault
+                                                      handler:^(UIAlertAction *action)
+                                                        {
+                                                            [self goToArticleFor:href];
+                                                        }]];
+    
     [self presentViewController:alertController
                        animated:YES
                      completion:^{
@@ -195,6 +203,15 @@ typedef NS_ENUM(NSInteger, WMFPreviewAndSaveMode) {
             [self save];
             break;
     }
+}
+
+- (void)goToArticleFor:(NSString *)href {
+    NSURL *url = [NSURL URLWithString:href];
+    
+    url = [NSURL URLWithString:
+           [NSString stringWithFormat:@"https://%@.m.%@%@", self.section.article.url.wmf_language, self.section.article.url.wmf_domain, href]];
+    
+    [self wmf_pushArticleWithURL:url dataStore:self.dataStore previewStore:self.previewStore animated:YES];
 }
 
 - (void)viewDidLoad {

@@ -200,6 +200,8 @@
     previewVC.funnel = self.funnel;
     previewVC.savedPagesFunnel = self.savedPagesFunnel;
     previewVC.delegate = self;
+    previewVC.dataStore = self.dataStore;
+    previewVC.previewStore = self.previewStore;
     [self.navigationController pushViewController:previewVC animated:YES];
 }
 
