@@ -17,6 +17,7 @@
 #import "CLLocation+WMFBearing.h"
 
 #import "WMFContentGroup+WMFFeedContentDisplaying.h"
+#import "WMFContentGroup+WMFDatabaseStorable.h"
 #import "WMFArticlePreview.h"
 #import "MWKHistoryEntry.h"
 
@@ -65,7 +66,7 @@ static NSString *const WMFFeedEmptyFooterReuseIdentifier = @"WMFFeedEmptyFooterR
 
 @property (nonatomic, strong) WMFLocationManager *locationManager;
 
-@property (nonatomic, strong) id<WMFDataSource> sectionDataSource;
+@property (nonatomic, strong, nullable) id<WMFDataSource> sectionDataSource;
 
 @property (nonatomic, strong) UIRefreshControl *refreshControl;
 
@@ -110,7 +111,7 @@ static NSString *const WMFFeedEmptyFooterReuseIdentifier = @"WMFFeedEmptyFooterR
               forControlEvents:UIControlEventTouchUpInside];
         self.navigationItem.titleView = b;
         self.navigationItem.titleView.isAccessibilityElement = YES;
-       
+
         self.navigationItem.titleView.accessibilityTraits |= UIAccessibilityTraitHeader;
         self.navigationItem.leftBarButtonItem = [self settingsBarButtonItem];
         self.navigationItem.rightBarButtonItem = [self wmf_searchBarButtonItem];
@@ -168,15 +169,6 @@ static NSString *const WMFFeedEmptyFooterReuseIdentifier = @"WMFFeedEmptyFooterR
     return _locationManager;
 }
 
-- (id<WMFDataSource>)sectionDataSource {
-    NSParameterAssert(self.internalContentStore);
-    if (!_sectionDataSource) {
-        _sectionDataSource = [self.internalContentStore contentGroupDataSource];
-        _sectionDataSource.granularDelegateCallbacksEnabled = NO;
-    }
-    return _sectionDataSource;
-}
-
 - (NSURL *)currentSiteURL {
     return [[[MWKLanguageLinkController sharedInstance] appLanguage] siteURL];
 }
@@ -213,6 +205,7 @@ static NSString *const WMFFeedEmptyFooterReuseIdentifier = @"WMFFeedEmptyFooterR
 - (void)updateFeedSources {
     WMFTaskGroup *group = [WMFTaskGroup new];
     [self.contentSources enumerateObjectsUsingBlock:^(id<WMFContentSource> _Nonnull obj, NSUInteger idx, BOOL *_Nonnull stop) {
+        //TODO: nearby doesnt always fire
         [group enter];
         [obj loadNewContentForce:NO
                       completion:^{
@@ -220,12 +213,11 @@ static NSString *const WMFFeedEmptyFooterReuseIdentifier = @"WMFFeedEmptyFooterR
                       }];
     }];
 
-    //TODO: nearby doesnt always fire.
-    //May need to time it out or exclude
-    [group waitInBackgroundWithCompletion:^{
-        [self resetRefreshControl];
-        [self.internalContentStore syncDataStoreToDatabase];
-    }];
+    [group waitInBackgroundWithTimeout:12
+                            completion:^{
+                                [self resetRefreshControl];
+                                [self.internalContentStore syncDataStoreToDatabase];
+                            }];
 }
 
 - (void)updateFeedWithLatestDatabaseContent {
@@ -235,11 +227,15 @@ static NSString *const WMFFeedEmptyFooterReuseIdentifier = @"WMFFeedEmptyFooterR
 #pragma mark - Section Access
 
 - (WMFContentGroup *)sectionAtIndex:(NSUInteger)sectionIndex {
-    return [self.sectionDataSource objectAtIndexPath:[NSIndexPath indexPathForRow:sectionIndex inSection:0]];
+    return (WMFContentGroup *)[self.sectionDataSource objectAtIndexPath:[NSIndexPath indexPathForRow:sectionIndex inSection:0]];
 }
 
 - (WMFContentGroup *)sectionForIndexPath:(NSIndexPath *)indexPath {
-    return [self.sectionDataSource objectAtIndexPath:[NSIndexPath indexPathForRow:indexPath.section inSection:0]];
+    return (WMFContentGroup *)[self.sectionDataSource objectAtIndexPath:[NSIndexPath indexPathForRow:indexPath.section inSection:0]];
+}
+
+- (NSUInteger)indexForSection:(WMFContentGroup *)section {
+    return [self.sectionDataSource indexPathForObject:section].row;
 }
 
 #pragma mark - Content Access
@@ -472,7 +468,17 @@ static NSString *const WMFFeedEmptyFooterReuseIdentifier = @"WMFFeedEmptyFooterR
     }
                            forControlEvents:UIControlEventValueChanged];
     [self resetRefreshControl];
-    self.sectionDataSource.delegate = self;
+
+    [self setupDataSource];
+}
+
+- (void)setupDataSource {
+    if (!self.sectionDataSource) {
+        self.sectionDataSource = [self.internalContentStore contentGroupDataSource];
+        self.sectionDataSource.granularDelegateCallbacksEnabled = NO;
+        self.sectionDataSource.delegate = self;
+        [self.collectionView reloadData];
+    }
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -493,6 +499,10 @@ static NSString *const WMFFeedEmptyFooterReuseIdentifier = @"WMFFeedEmptyFooterR
 
     [[PiwikTracker sharedInstance] wmf_logView:self];
     [NSUserActivity wmf_makeActivityActive:[NSUserActivity wmf_exploreViewActivity]];
+}
+
+- (void)viewDidDisappear:(BOOL)animated {
+    [super viewDidDisappear:animated];
 }
 
 - (void)traitCollectionDidChange:(nullable UITraitCollection *)previousTraitCollection {
@@ -668,7 +678,7 @@ static NSString *const WMFFeedEmptyFooterReuseIdentifier = @"WMFFeedEmptyFooterR
             if (!self || !section) {
                 return;
             }
-            UIAlertController *menuActionSheet = [self menuActionSheetForURL:[section headerContentURL]];
+            UIAlertController *menuActionSheet = [self menuActionSheetForSection:section];
 
             if (UI_USER_INTERFACE_IDIOM() == UIUserInterfaceIdiomPad) {
                 menuActionSheet.modalPresentationStyle = UIModalPresentationPopover;
@@ -693,12 +703,20 @@ static NSString *const WMFFeedEmptyFooterReuseIdentifier = @"WMFFeedEmptyFooterR
 
 #pragma mark - WMFHeaderMenuProviding
 
-- (UIAlertController *)menuActionSheetForURL:(NSURL *)url {
+- (UIAlertController *)menuActionSheetForSection:(WMFContentGroup *)section {
+    NSURL *url = [section headerContentURL];
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:nil message:nil preferredStyle:UIAlertControllerStyleActionSheet];
     [sheet addAction:[UIAlertAction actionWithTitle:MWLocalizedString(@"home-hide-suggestion-prompt", nil)
                                               style:UIAlertActionStyleDestructive
                                             handler:^(UIAlertAction *_Nonnull action) {
                                                 [self.userStore.blackList addBlackListArticleURL:url];
+                                                [self.userStore notifyWhenWriteTransactionsComplete:^{
+                                                    NSUInteger index = [self indexForSection:section];
+                                                    self.sectionDataSource.delegate = nil;
+                                                    [self updateFeedWithLatestDatabaseContent];
+                                                    [self.collectionView deleteSections:[NSIndexSet indexSetWithIndex:index]];
+                                                    self.sectionDataSource.delegate = self;
+                                                }];
                                             }]];
     [sheet addAction:[UIAlertAction actionWithTitle:MWLocalizedString(@"home-hide-suggestion-cancel", nil) style:UIAlertActionStyleCancel handler:NULL]];
     return sheet;
@@ -951,7 +969,7 @@ static NSString *const WMFFeedEmptyFooterReuseIdentifier = @"WMFFeedEmptyFooterR
 
     switch ([group detailType]) {
         case WMFFeedDetailTypePage: {
-            [self.navigationController pushViewController:vc animated:animated];
+            [self wmf_pushArticleViewController:(WMFArticleViewController *)vc animated:animated];
         } break;
         case WMFFeedDetailTypePageWithRandomButton: {
             [self.navigationController pushViewController:vc animated:animated];

@@ -66,7 +66,7 @@ class WMFInTheNewsNotificationViewController: UIViewController, UNNotificationCo
             articleURL = NSURL(string: articleURLString)
         }
         
-        PiwikTracker.sharedInstance()?.wmf_logActionPreviewInContext(self, contentType: self)
+        PiwikTracker.sharedInstance()?.wmf_logActionPreviewInContext(self, contentType: self, date: NSDate())
         
         do {
             if let dictionary = info[WMFNotificationInfoFeedNewsStoryKey] as? [String: AnyObject],
@@ -132,10 +132,18 @@ class WMFInTheNewsNotificationViewController: UIViewController, UNNotificationCo
         case UNNotificationDismissActionIdentifier:
             completion(.Dismiss)
         case WMFInTheNewsNotificationSaveForLaterActionIdentifier:
-            let dataStore: MWKDataStore = SessionSingleton.sharedInstance().dataStore
-            dataStore.savedPageList.addSavedPageWithURL(articleURL)
-            completion(.Dismiss)
+            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), {
+                PiwikTracker.sharedInstance()?.wmf_logActionSaveInContext(self, contentType: self)
+                let dataStore: MWKDataStore = SessionSingleton.sharedInstance().dataStore
+                dataStore.savedPageList.addSavedPageWithURL(articleURL)
+                dataStore.notifyWhenWriteTransactionsComplete({ 
+                    dispatch_async(dispatch_get_main_queue(), {
+                        completion(.Dismiss)
+                    })
+                })
+            })
         case WMFInTheNewsNotificationShareActionIdentifier:
+            PiwikTracker.sharedInstance()?.wmf_logActionTapThroughInContext(self, contentType: self)
             completion(.DismissAndForwardAction)
         case WMFInTheNewsNotificationReadNowActionIdentifier:
             fallthrough
@@ -143,6 +151,7 @@ class WMFInTheNewsNotificationViewController: UIViewController, UNNotificationCo
             fallthrough
         default:
             guard let wikipediaSchemeURL = articleURL.wmf_wikipediaSchemeURL else {
+                completion(.Dismiss)
                 break
             }
             PiwikTracker.sharedInstance()?.wmf_logActionTapThroughInContext(self, contentType: self)

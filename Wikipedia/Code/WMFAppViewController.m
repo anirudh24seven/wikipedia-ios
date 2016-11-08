@@ -211,22 +211,39 @@ static NSTimeInterval const WMFTimeBeforeRefreshingExploreScreen = 24 * 60 * 60;
     [self resumeApp];
 }
 
+- (void)appDidBecomeActiveWithNotification:(NSNotification *)note {
+    if (![self uiIsLoaded]) {
+        return;
+    }
+    self.notificationsController.applicationActive = YES;
+    [self.dataStore syncDataStoreToDatabase];
+    [self.previewStore syncDataStoreToDatabase];
+    [self.contentStore syncDataStoreToDatabase];
+    [[NSNotificationCenter defaultCenter] postNotificationName:MWKSetupDataSourcesNotification object:nil];
+#if FB_TWEAK_ENABLED
+    if (FBTweakValue(@"Notifications", @"In the news", @"Send on app open", NO)) {
+        [self debugSendRandomInTheNewsNotification];
+    }
+#endif
+}
+
+- (void)appWillResignActiveWithNotification:(NSNotification *)note {
+    if (![self uiIsLoaded]) {
+        return;
+    }
+    self.notificationsController.applicationActive = NO;
+    [[NSNotificationCenter defaultCenter] postNotificationName:MWKTeardownDataSourcesNotification object:nil];
+}
+
 - (void)appDidEnterBackgroundWithNotification:(NSNotification *)note {
+    if (![self uiIsLoaded]) {
+        return;
+    }
     [self startBackgroundTask];
     dispatch_async(dispatch_get_main_queue(), ^{
 #if FB_TWEAK_ENABLED
         if (FBTweakValue(@"Notifications", @"In the news", @"Send on app exit", NO)) {
-            WMFNewsContentGroup *newsContentGroup = (WMFNewsContentGroup *)[self.contentStore firstGroupOfKind:[WMFNewsContentGroup kind]];
-            if (newsContentGroup) {
-                NSArray<WMFFeedNewsStory *> *stories = [self.contentStore contentForContentGroup:newsContentGroup];
-                if (stories.count > 0) {
-                    NSInteger randomIndex = (NSInteger)arc4random_uniform((uint32_t)stories.count);
-                    WMFFeedNewsStory *randomStory = stories[randomIndex];
-                    WMFFeedArticlePreview *feedPreview = randomStory.featuredArticlePreview ?: randomStory.articlePreviews[0];
-                    WMFArticlePreview *preview = [self.previewStore itemForURL:feedPreview.articleURL];
-                    [[self feedContentSource] scheduleNotificationForNewsStory:randomStory articlePreview:preview force:YES];
-                }
-            }
+            [self debugSendRandomInTheNewsNotification];
         }
 #endif
         [self pauseApp];
@@ -288,6 +305,8 @@ static NSTimeInterval const WMFTimeBeforeRefreshingExploreScreen = 24 * 60 * 60;
     [window makeKeyAndVisible];
 
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(appWillEnterForegroundWithNotification:) name:UIApplicationWillEnterForegroundNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(appDidBecomeActiveWithNotification:) name:UIApplicationDidBecomeActiveNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(appWillResignActiveWithNotification:) name:UIApplicationWillResignActiveNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(appDidEnterBackgroundWithNotification:) name:UIApplicationDidEnterBackgroundNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(appLanguageDidChangeWithNotification:) name:WMFPreferredLanguagesDidChangeNotification object:nil];
 
@@ -300,7 +319,17 @@ static NSTimeInterval const WMFTimeBeforeRefreshingExploreScreen = 24 * 60 * 60;
     [fm removeItemAtPath:[SDImageCache wmf_imageCacheDirectory] error:nil];
     [[NSUserDefaults wmf_userDefaults] wmf_setDidMigrateToSharedContainer:NO];
 #endif
+    
+    [self migrateToSharedContainerIfNecessaryWithCompletion:^{
+        [self migrateToNewFeedIfNecessaryWithCompletion:^{
+            [self finishLaunch];
+        }];
+    }];
+}
 
+
+
+- (void)migrateToSharedContainerIfNecessaryWithCompletion:(nonnull dispatch_block_t)completion {
     if (![[NSUserDefaults wmf_userDefaults] wmf_didMigrateToSharedContainer]) {
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
             NSError *error = nil;
@@ -313,11 +342,37 @@ static NSTimeInterval const WMFTimeBeforeRefreshingExploreScreen = 24 * 60 * 60;
             }
             dispatch_async(dispatch_get_main_queue(), ^{
                 [[NSUserDefaults wmf_userDefaults] wmf_setDidMigrateToSharedContainer:YES];
-                [self finishLaunch];
+                completion();
             });
         });
     } else {
-        [self finishLaunch];
+        completion();
+    }
+}
+
+- (void)migrateToNewFeedIfNecessaryWithCompletion:(nonnull dispatch_block_t)completion {
+    YapDatabase *db = [YapDatabase sharedInstance];
+    if ([[NSUserDefaults wmf_userDefaults] wmf_didMigrateToNewFeed]) {
+        [YapDatabase wmf_registerViewsInDatabase:db];
+        self.previewStore = [[WMFArticlePreviewDataStore alloc] initWithDatabase:[YapDatabase sharedInstance]];
+        self.contentStore = [[WMFContentGroupDataStore alloc] initWithDatabase:[YapDatabase sharedInstance]];
+        completion();
+    } else {
+        YapDatabaseConnection *conn = [db wmf_newWriteConnection];
+        [conn asyncReadWriteWithBlock:^(YapDatabaseReadWriteTransaction *_Nonnull transaction) {
+            [transaction removeAllObjectsInCollection:[WMFContentGroup databaseCollectionName]];
+        }
+            completionQueue:dispatch_get_main_queue()
+            completionBlock:^{
+                [YapDatabase wmf_registerViewsInDatabase:db];
+                self.previewStore = [[WMFArticlePreviewDataStore alloc] initWithDatabase:[YapDatabase sharedInstance]];
+                self.contentStore = [[WMFContentGroupDataStore alloc] initWithDatabase:[YapDatabase sharedInstance]];
+                [self preloadContentSourcesForced:YES
+                                       completion:^{
+                                           [[NSUserDefaults wmf_userDefaults] wmf_setDidMigrateToNewFeed:YES];
+                                           completion();
+                                       }];
+            }];
     }
 }
 
@@ -325,16 +380,10 @@ static NSTimeInterval const WMFTimeBeforeRefreshingExploreScreen = 24 * 60 * 60;
     @weakify(self)
         [self presentOnboardingIfNeededWithCompletion:^(BOOL didShowOnboarding) {
             @strongify(self)
-                self.previewStore = [[WMFArticlePreviewDataStore alloc] initWithDatabase:[YapDatabase sharedInstance]];
-            self.contentStore = [[WMFContentGroupDataStore alloc] initWithDatabase:[YapDatabase sharedInstance]];
-
-            [self preloadContentSourcesIfNeededWithCompletion:^{
                 [self loadMainUI];
-                [self hideSplashViewAnimated:!didShowOnboarding];
-                [self resumeApp];
-                [[PiwikTracker sharedInstance] wmf_logView:[self rootViewControllerForTab:WMFAppTabTypeExplore]];
-            }];
-
+            [self hideSplashViewAnimated:!didShowOnboarding];
+            [self resumeApp];
+            [[PiwikTracker sharedInstance] wmf_logView:[self rootViewControllerForTab:WMFAppTabTypeExplore]];
         }];
 }
 
@@ -350,8 +399,6 @@ static NSTimeInterval const WMFTimeBeforeRefreshingExploreScreen = 24 * 60 * 60;
     }
 
     [self.statsFunnel logAppNumberOfDaysSinceInstall];
-
-    [self.dataStore syncDataStoreToDatabase];
 
     [[WMFAuthenticationManager sharedInstance] loginWithSavedCredentialsWithSuccess:NULL failure:NULL];
 
@@ -447,32 +494,22 @@ static NSTimeInterval const WMFTimeBeforeRefreshingExploreScreen = 24 * 60 * 60;
 
 #pragma mark - Content Sources
 
-- (void)preloadContentSourcesIfNeededWithCompletion:(void (^)(void))completion {
 
-    if ([[NSUserDefaults wmf_userDefaults] wmf_didMigrateToNewFeed]) {
-        if (completion) {
-            completion();
+- (void)preloadContentSourcesForced:(BOOL)force completion:(void (^)(void))completion {
+    WMFTaskGroup *group = [WMFTaskGroup new];
+    [self.contentSources enumerateObjectsUsingBlock:^(id<WMFContentSource> _Nonnull obj, NSUInteger idx, BOOL *_Nonnull stop) {
+
+        if ([obj conformsToProtocol:@protocol(WMFDateBasedContentSource)]) {
+            [group enter];
+            [(id<WMFDateBasedContentSource>)obj preloadContentForNumberOfDays:3
+                                                                        force:force
+                                                                   completion:^{
+                                                                       [group leave];
+                                                                   }];
         }
-    } else {
-        WMFTaskGroup *group = [WMFTaskGroup new];
-        [self.contentSources enumerateObjectsUsingBlock:^(id<WMFContentSource> _Nonnull obj, NSUInteger idx, BOOL *_Nonnull stop) {
+    }];
 
-            if ([obj conformsToProtocol:@protocol(WMFDateBasedContentSource)]) {
-                [group enter];
-                [(id<WMFDateBasedContentSource>)obj preloadContentForNumberOfDays:2
-                                                                       completion:^{
-                                                                           [group leave];
-                                                                       }];
-            }
-        }];
-
-        [group waitInBackgroundWithCompletion:^{
-            [[NSUserDefaults wmf_userDefaults] wmf_setDidMigrateToNewFeed:YES];
-            if (completion) {
-                completion();
-            }
-        }];
-    }
+    [group waitInBackgroundWithCompletion:completion];
 }
 
 - (void)updateFeedSourcesWithCompletion:(dispatch_block_t)completion {
@@ -813,7 +850,9 @@ static NSTimeInterval const WMFTimeBeforeRefreshingExploreScreen = 24 * 60 * 60;
 }
 
 - (WMFNotificationsController *)notificationsController {
-    return [WMFNotificationsController sharedNotificationsController];
+    WMFNotificationsController *controller = [WMFNotificationsController sharedNotificationsController];
+    controller.applicationActive = [[UIApplication sharedApplication] applicationState] == UIApplicationStateActive;
+    return controller;
 }
 
 - (SessionSingleton *)session {
@@ -1050,16 +1089,16 @@ static NSString *const WMFDidShowOnboarding = @"DidShowOnboarding5.3";
     return YES;
 }
 - (void)updateActiveTitleAccessibilityButton:(UIViewController *)viewController {
-    if([viewController isKindOfClass:[WMFExploreViewController class]]) {
-        WMFExploreViewController * vc = (WMFExploreViewController *) viewController;
+    if ([viewController isKindOfClass:[WMFExploreViewController class]]) {
+        WMFExploreViewController *vc = (WMFExploreViewController *)viewController;
         vc.titleButton.accessibilityLabel = MWLocalizedString(@"home-title-accessibility-label", nil);
-    } else if([viewController isKindOfClass:[WMFArticleViewController class]]) {
-        WMFArticleViewController * vc = (WMFArticleViewController *) viewController;
-        if(self.rootTabBarController.selectedIndex == WMFAppTabTypeExplore){
+    } else if ([viewController isKindOfClass:[WMFArticleViewController class]]) {
+        WMFArticleViewController *vc = (WMFArticleViewController *)viewController;
+        if (self.rootTabBarController.selectedIndex == WMFAppTabTypeExplore) {
             vc.titleButton.accessibilityLabel = MWLocalizedString(@"home-button-explore-accessibility-label", nil);
-        }else  if(self.rootTabBarController.selectedIndex == WMFAppTabTypeSaved){
+        } else if (self.rootTabBarController.selectedIndex == WMFAppTabTypeSaved) {
             vc.titleButton.accessibilityLabel = MWLocalizedString(@"home-button-saved-accessibility-label", nil);
-        }else if(self.rootTabBarController.selectedIndex == WMFAppTabTypeRecent){
+        } else if (self.rootTabBarController.selectedIndex == WMFAppTabTypeRecent) {
             vc.titleButton.accessibilityLabel = MWLocalizedString(@"home-button-history-accessibility-label", nil);
         }
     }
@@ -1071,7 +1110,7 @@ static NSString *const WMFDidShowOnboarding = @"DidShowOnboarding5.3";
                     animated:(BOOL)animated {
     navigationController.interactivePopGestureRecognizer.delegate = self;
     [navigationController wmf_hideToolbarIfViewControllerHasNoToolbarItems:viewController];
-    [self updateActiveTitleAccessibilityButton: viewController];
+    [self updateActiveTitleAccessibilityButton:viewController];
 }
 
 - (void)navigationController:(UINavigationController *)navigationController didShowViewController:(UIViewController *)viewController animated:(BOOL)animated {
@@ -1153,7 +1192,20 @@ static NSString *const WMFDidShowOnboarding = @"DidShowOnboarding5.3";
 
 // The method will be called on the delegate only if the application is in the foreground. If the method is not implemented or the handler is not called in a timely manner then the notification will not be presented. The application can choose to have the notification presented as a sound, badge, alert and/or in the notification list. This decision should be based on whether the information in the notification is otherwise visible to the user.
 - (void)userNotificationCenter:(UNUserNotificationCenter *)center willPresentNotification:(UNNotification *)notification withCompletionHandler:(void (^)(UNNotificationPresentationOptions options))completionHandler {
-    completionHandler(UNNotificationPresentationOptionAlert);
+    NSDictionary *info = notification.request.content.userInfo;
+    NSString *articleURLString = info[WMFNotificationInfoArticleURLStringKey];
+    NSURL *articleURL = [NSURL URLWithString:articleURLString];
+    NSString *content = notification.request.content.body;
+    [[PiwikTracker sharedInstance] wmf_logActionPreviewInContext:@"notification" contentType:articleURL.host date:[NSDate date]];
+
+    [[WMFAlertManager sharedInstance] showInTheNewsAlert:content
+                                                  sticky:NO
+                                   dismissPreviousAlerts:NO
+                                             tapCallBack:^{
+                                                 [[PiwikTracker sharedInstance] wmf_logActionTapThroughInContext:@"notification" contentType:articleURL.host];
+                                                 [self showInTheNewsForNotificationInfo:info];
+                                             }];
+    completionHandler(UNNotificationPresentationOptionNone);
 }
 
 // The method will be called on the delegate when the user responded to the notification by opening the application, dismissing the notification or choosing a UNNotificationAction. The delegate must be set before the application returns from applicationDidFinishLaunching:.
@@ -1169,21 +1221,49 @@ static NSString *const WMFDidShowOnboarding = @"DidShowOnboarding5.3";
             [articleVC shareArticleWhenReady];
         } else if ([actionIdentifier isEqualToString:UNNotificationDefaultActionIdentifier]) {
             [[PiwikTracker sharedInstance] wmf_logActionTapThroughInContext:@"notification" contentType:articleURL.host];
-            NSDictionary *JSONDictionary = info[WMFNotificationInfoFeedNewsStoryKey];
-            NSError *JSONError = nil;
-            WMFFeedNewsStory *feedNewsStory = [MTLJSONAdapter modelOfClass:[WMFFeedNewsStory class] fromJSONDictionary:JSONDictionary error:&JSONError];
-            if (!feedNewsStory || JSONError) {
-                DDLogError(@"Error parsing feed news story: %@", JSONError);
-                [self showArticleForURL:articleURL animated:NO];
-                return;
-            }
-            [self selectExploreTabAndDismissPresentedViewControllers];
-            [self.exploreViewController showInTheNewsForStory:feedNewsStory date:nil animated:NO];
+            [self showInTheNewsForNotificationInfo:info];
         } else if ([actionIdentifier isEqualToString:UNNotificationDismissActionIdentifier]) {
         }
     }
 
     completionHandler();
+}
+
+- (void)showInTheNewsForNotificationInfo:(NSDictionary *)info {
+    NSString *articleURLString = info[WMFNotificationInfoArticleURLStringKey];
+    NSURL *articleURL = [NSURL URLWithString:articleURLString];
+    NSDictionary *JSONDictionary = info[WMFNotificationInfoFeedNewsStoryKey];
+    NSError *JSONError = nil;
+    WMFFeedNewsStory *feedNewsStory = [MTLJSONAdapter modelOfClass:[WMFFeedNewsStory class] fromJSONDictionary:JSONDictionary error:&JSONError];
+    if (!feedNewsStory || JSONError) {
+        DDLogError(@"Error parsing feed news story: %@", JSONError);
+        [self showArticleForURL:articleURL animated:NO];
+        return;
+    }
+    [self selectExploreTabAndDismissPresentedViewControllers];
+    [self.exploreViewController showInTheNewsForStory:feedNewsStory date:nil animated:NO];
+}
+
+- (void)debugSendRandomInTheNewsNotification {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+
+        [self.notificationsController requestAuthenticationIfNecessaryWithCompletionHandler:^(BOOL granted, NSError *_Nullable error) {
+            if (!granted) {
+                return;
+            }
+            WMFNewsContentGroup *newsContentGroup = (WMFNewsContentGroup *)[self.contentStore firstGroupOfKind:[WMFNewsContentGroup kind]];
+            if (newsContentGroup) {
+                NSArray<WMFFeedNewsStory *> *stories = [self.contentStore contentForContentGroup:newsContentGroup];
+                if (stories.count > 0) {
+                    NSInteger randomIndex = (NSInteger)arc4random_uniform((uint32_t)stories.count);
+                    WMFFeedNewsStory *randomStory = stories[randomIndex];
+                    WMFFeedArticlePreview *feedPreview = randomStory.featuredArticlePreview ?: randomStory.articlePreviews[0];
+                    WMFArticlePreview *preview = [self.previewStore itemForURL:feedPreview.articleURL];
+                    [[self feedContentSource] scheduleNotificationForNewsStory:randomStory articlePreview:preview force:YES];
+                }
+            }
+        }];
+    });
 }
 
 @end
