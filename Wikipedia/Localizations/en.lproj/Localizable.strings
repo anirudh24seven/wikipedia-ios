@@ -516,3 +516,8 @@
 
 "save-action" = "Save";
 "unsave-action" = "Unsave";
+
+"leave-page-title" = "Your changes have not been saved yet";
+"leave-page-message" = "Are you sure you want to leave this page?";
+"leave-page-cancel" = "Cancel";
+"leave-page-leave" = "Leave";

@@ -453,3 +453,7 @@
 "back" = "Generic 'Back' title for back button\n{{Identical|Back}}";
 "save-action" = "Accessibility action description for 'Save'";
 "unsave-action" = "Accessibility action description for 'Unsave'";
+"leave-page-title" = "Title for alert when user tries navigate to another page while editing a page";
+"leave-page-message" = "Message for alert when user tries navigate to another page while editing a page";
+"leave-page-leave" = "Text in alert allowing user to leave to another page while editing a page";
+"leave-page-cancel" = "Text in alert for user to cancel action of navigating to another page while editing a page";

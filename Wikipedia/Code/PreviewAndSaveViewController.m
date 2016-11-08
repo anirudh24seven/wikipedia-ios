@@ -124,13 +124,13 @@ typedef NS_ENUM(NSInteger, WMFPreviewAndSaveMode) {
 - (void)wmf_showAlertForTappedAnchorHref:(NSString *)href {
     
     UIAlertController *alertController =
-        [UIAlertController alertControllerWithTitle:@"Your changes have not been saved yet"
-                                            message:@"Are you sure you want to leave this page?"
+        [UIAlertController alertControllerWithTitle:MWLocalizedString(@"leave-page-title", nil)
+                                            message:MWLocalizedString(@"leave-page-message", nil)
                                      preferredStyle:UIAlertControllerStyleAlert];
-    [alertController addAction:[UIAlertAction actionWithTitle:@"Cancel"
+    [alertController addAction:[UIAlertAction actionWithTitle:MWLocalizedString(@"leave-page-cancel", nil)
                                                         style:UIAlertActionStyleCancel
                                                       handler:nil]];
-    [alertController addAction:[UIAlertAction actionWithTitle:@"Leave"
+    [alertController addAction:[UIAlertAction actionWithTitle:MWLocalizedString(@"leave-page-leave", nil)
                                                         style:UIAlertActionStyleDefault
                                                       handler:^(UIAlertAction *action)
                                                         {
